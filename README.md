@@ -1,4 +1,4 @@
-# 🚨 基于 MobileNetV3 与关键点融合的摔倒检测系统
+# 基于 MobileNetV3 与关键点融合的摔倒检测系统
 
 > **深度学习实战项目** | 图像分类 · 姿态识别 · 双分支多模态融合
 > 上海杉达学院 · 信息科学与技术学院 | 作者：黄瀚文
@@ -7,67 +7,67 @@
 
 ---
 
-## ✨ 项目亮点
+## 项目亮点
 
-- 🧠 **双分支中期融合架构**：图像纹理特征 + 人体骨骼姿态特征在中间层拼接，兼顾全局视觉信息与姿态拓扑信息
-- ⚡ **轻量化设计**：MobileNetV3-Large 主干，模型仅约 332 万参数，适合边缘设备部署
-- 📦 **完整工程链路**：VOC 标注解析 → 数据增强 → 类别加权训练 → 早停保存 → 推理演示，开箱即用
-- 🎥 **实时检测系统**：基于 MediaPipe 姿态估计的规则法实时摔倒检测，支持摄像头流、阈值调节、FPS 显示
-- 📊 **严谨的实验分析**：含训练曲线、混淆矩阵、分类报告、ROC 与 Grad-CAM 热力图分析（增强版脚本）
-- 🍎 **Apple MPS 硬件加速**：macOS 上自动启用 MPS，无需 CUDA 也能高效训练
+- **双分支中期融合架构**：图像纹理特征 + 人体骨骼姿态特征在中间层拼接，兼顾全局视觉信息与姿态拓扑信息
+- **轻量化设计**：MobileNetV3-Large 主干，模型仅约 332 万参数，适合边缘设备部署
+- **完整工程链路**：VOC 标注解析 → 数据增强 → 类别加权训练 → 早停保存 → 推理演示，开箱即用
+- **实时检测系统**：基于 MediaPipe 姿态估计的规则法实时摔倒检测，支持摄像头流、阈值调节、FPS 显示
+- **严谨的实验分析**：含训练曲线、混淆矩阵、分类报告、ROC 与 Grad-CAM 热力图分析（增强版脚本）
+- **Apple MPS 硬件加速**：macOS 上自动启用 MPS，无需 CUDA 也能高效训练
 
 ---
 
-## 🎯 本项目的求职价值
+## 本项目的求职价值
 
-### 1️⃣ 架构设计能力 —— 一张图看懂方案
+### 1. 架构设计能力 —— 一张图看懂方案
 系统架构采用 **Mermaid 流程图** 直观呈现（见下节）：从**多模态融合策略的选型**（早期 / 中期 / 晚期融合的权衡，最终选择中期融合）、双分支特征维度的设计（960 维图像 + 64 维姿态 → 1024 维联合表征），到轻量化骨干的选型（MobileNetV3 对比 ResNet 的部署考量），形成了一条完整、可讲述的设计链路。
 
-### 2️⃣ 实验分析与归因能力 —— 数字背后的问题定位
+### 2. 实验分析与归因能力 —— 数字背后的问题定位
 实验准确率 **48.13%** 如实呈现，项目价值不在于数字本身，而在于完整的**归因链条**：
 
 > 数据仅有边界框标注 → 关键点分支输入为零向量、模型退化为纯图像分类器 → 摔倒与弯腰/蹲下等姿态在图像空间高度相似 → 单帧静态判定缺少运动时序信息 → 性能上限受限 → 提出"姿态估计激活关键点分支 + 时序建模"的针对性方案
 
 不掩盖问题、能定位问题、能给出可落地的改进方案——这是工程素养的直接体现。
 
-### 3️⃣ 行业认知与技术视野 —— 改进方向指明路线
+### 3. 行业认知与技术视野 —— 改进方向指明路线
 改进方向全部对应**成熟的技术路线**：MediaPipe / OpenPose 姿态估计、LSTM / GRU 时序建模、URFall / Le2i 公开摔倒数据集、量化剪枝边缘部署——说明对摔倒检测领域的主流方案有整体认知，而非只会跑通一个模型。
 
-### 4️⃣ 工程可复现性 —— 两条命令完整复现
+### 4. 工程可复现性 —— 两条命令完整复现
 ```bash
 git clone git@github.com:hhwoct/DeepLearning-Fall_detection.git
-conda env create -f environment.yml   # 或按下方"快速开始"安装依赖
-python FDS                             # 训练（约 332 万参数，MPS/CUDA 加速）
-python webcam_fall_detection.py        # 实时摄像头检测
+conda env create -f environment.yml # 或按下方"快速开始"安装依赖
+python FDS # 训练（约 332 万参数，MPS/CUDA 加速）
+python webcam_fall_detection.py # 实时摄像头检测
 ```
 
 **数据（7,782 张标注图）、代码（训练/推理/实时检测）、论文（20 页）三件套齐全**，任何一位面试官都可以 clone 后完整复现，可信度经得起验证。
 
 ---
 
-## 🏗️ 系统架构
+## 系统架构
 
 ### 整体流程
 
 ```mermaid
 flowchart LR
-    subgraph 数据模块
-        A[图像 224×224×3] --> P[预处理与增强<br>归一化/翻转/旋转/色彩抖动]
-        X[VOC XML 标注] --> Q[标签解析<br>down→摔倒 / person→正常]
-    end
-    subgraph 双分支模型
-        P --> B[MobileNetV3-Large<br>预训练主干]
-        K[17 关键点坐标<br>34 维向量] --> D[关键点编码器<br>FC 34→256→128→64]
-        B --> E[960 维图像特征]
-        D --> F[64 维姿态特征]
-        E --> G[拼接 1024 维]
-        F --> G
-        G --> H[分类器<br>FC 1024→256→128→2]
-    end
-    Q --> M[加权交叉熵损失]
-    H --> M
-    M --> T[反向传播 · 早停 · 模型保存]
-    H --> I[正常 / 摔倒]
+ subgraph 数据模块
+ A[图像 224×224×3] --> P[预处理与增强<br>归一化/翻转/旋转/色彩抖动]
+ X[VOC XML 标注] --> Q[标签解析<br>down→摔倒 / person→正常]
+ end
+ subgraph 双分支模型
+ P --> B[MobileNetV3-Large<br>预训练主干]
+ K[17 关键点坐标<br>34 维向量] --> D[关键点编码器<br>FC 34→256→128→64]
+ B --> E[960 维图像特征]
+ D --> F[64 维姿态特征]
+ E --> G[拼接 1024 维]
+ F --> G
+ G --> H[分类器<br>FC 1024→256→128→2]
+ end
+ Q --> M[加权交叉熵损失]
+ H --> M
+ M --> T[反向传播 · 早停 · 模型保存]
+ H --> I[正常 / 摔倒]
 ```
 
 ### 模型结构（表）
@@ -81,7 +81,7 @@ flowchart LR
 
 ---
 
-## 🛠️ 技术栈
+## 技术栈
 
 | 类别 | 技术 |
 |---|---|
@@ -95,25 +95,25 @@ flowchart LR
 
 ---
 
-## 📁 项目结构
+## 项目结构
 
 ```
 .
-├── FDS                          # 训练脚本：双分支模型 + 完整训练流水线
-├── logs/FDS_V2                  # 增强版：ResNet18 对比实验 + ROC + Grad-CAM 热力图
-├── webcam_fall_detection.py     # 实时摄像头摔倒检测（MediaPipe 规则法）
-├── fix_dataset.py               # 数据集整理工具（配对校验与分层划分）
+├── FDS # 训练脚本：双分支模型 + 完整训练流水线
+├── logs/FDS_V2 # 增强版：ResNet18 对比实验 + ROC + Grad-CAM 热力图
+├── webcam_fall_detection.py # 实时摄像头摔倒检测（MediaPipe 规则法）
+├── fix_dataset.py # 数据集整理工具（配对校验与分层划分）
 ├── dataset/
-│   ├── train/images/            # 训练集：6226 张图像 + 同名 VOC XML 标注
-│   └── val/images/              # 验证集：1556 张图像 + 同名 VOC XML 标注
-├── checkpoints/                 # 模型权重保存目录
-├── logs/                        # 训练曲线与日志输出目录
-└── 课程论文.pdf                 # 详细设计文档（20 页）
+│ ├── train/images/ # 训练集：6226 张图像 + 同名 VOC XML 标注
+│ └── val/images/ # 验证集：1556 张图像 + 同名 VOC XML 标注
+├── checkpoints/ # 模型权重保存目录
+├── logs/ # 训练曲线与日志输出目录
+└── 课程论文.pdf # 详细设计文档（20 页）
 ```
 
 ---
 
-## 📊 数据集
+## 数据集
 
 - **来源**：公开摔倒行为数据（ModelScope `10142Videos-FallBehaviorData` 视频抽帧）
 - **规模**：共 **7,782 张** RGB 图像，室内多场景（不同光照、角度、多人共存）
@@ -122,16 +122,16 @@ flowchart LR
 
 ---
 
-## 🚀 快速开始
+## 快速开始
 
-### 1️⃣ 环境准备（一键创建）
+### 1. 环境准备（一键创建）
 
 ```bash
-conda env create -f environment.yml   # 自动创建 fall_detection 环境并安装全部依赖
+conda env create -f environment.yml # 自动创建 fall_detection 环境并安装全部依赖
 conda activate fall_detection
 ```
 
-### 2️⃣ 训练模型
+### 2. 训练模型
 
 ```bash
 python FDS
@@ -139,12 +139,12 @@ python FDS
 
 自动完成：数据加载校验 → 标签解析 → 类别权重计算 → 50 轮训练（早停保护）→ 最佳模型保存至 `checkpoints/fall_detection_model.pth` → 输出训练曲线与混淆矩阵。
 
-> 💡 增强实验（MobileNetV3 vs ResNet18 对比 + ROC + Grad-CAM 可视化）：
+> 增强实验（MobileNetV3 vs ResNet18 对比 + ROC + Grad-CAM 可视化）：
 > ```bash
 > python logs/FDS_V2
 > ```
 
-### 3️⃣ 实时摄像头检测
+### 3. 实时摄像头检测
 
 ```bash
 python webcam_fall_detection.py
@@ -154,9 +154,9 @@ python webcam_fall_detection.py
 
 ---
 
-## 📈 实验结果
+## 实验结果
 
-### ✅ 最新复现结果（数据修复后完整训练）
+### 最新复现结果（数据修复后完整训练）
 
 数据集经**配对校验与分层重划分**（图片-标注严格一一对应）后重新训练，早停于 Epoch 18，最终验证结果：
 
@@ -177,11 +177,11 @@ python webcam_fall_detection.py
 | 正常 | 0.84 | 0.79 | 0.81 | 130 |
 | 摔倒 | 0.98 | 0.99 | 0.98 | 1,426 |
 
-- 📈 训练曲线：[logs/training_history.png](./logs/training_history.png)
-- 🎯 混淆矩阵：[logs/confusion_matrix.png](./logs/confusion_matrix.png)
-- 💾 训练权重：[checkpoints/fall_detection_model.pth](./checkpoints/fall_detection_model.pth)（13.5 MB）
+- 训练曲线：[logs/training_history.png](./logs/training_history.png)
+- 混淆矩阵：[logs/confusion_matrix.png](./logs/confusion_matrix.png)
+- 训练权重：[checkpoints/fall_detection_model.pth](./checkpoints/fall_detection_model.pth)（13.5 MB）
 
-### 📖 论文实验记录（初版数据，性能受限的原因分析）
+### 论文实验记录（初版数据，性能受限的原因分析）
 
 课程论文记录的首轮实验在**未配对数据**上进行（图片与标注文件被错误拆分，导致标签污染），验证准确率仅 48.13%。论文对此进行了完整归因：
 
@@ -191,7 +191,7 @@ python webcam_fall_detection.py
 
 **修复数据配对后，同一模型架构准确率从 48.13% 跃升至 96.98%**——验证了数据质量对深度学习模型的决定性影响，也展示了问题定位与修复的工程能力。
 
-> ⚠️ 结果偏低的主要原因（论文中的深度分析）：
+> 结果偏低的主要原因（论文中的深度分析）：
 > ① 数据集仅有边界框标注、**缺乏骨骼关键点**，关键点分支输入为零向量，模型实际退化为纯图像分类器；
 > ② 摔倒样本绝对数量不足，类别不平衡难以完全消除；
 > ③ 单帧静态判定无法利用摔倒过程的**运动时序信息**，与躺卧等相似姿态难以区分。
@@ -200,7 +200,7 @@ python webcam_fall_detection.py
 
 ---
 
-## 🚀 改进方向（已规划）
+## 改进方向（已规划）
 
 1. **激活关键点分支**：引入 MediaPipe / OpenPose 自动提取关键点坐标，无需额外标注即可激活双分支融合的完整能力（项目已内置 MediaPipe 姿态估计能力）
 2. **时序建模**：扩展为视频片段分析，引入 LSTM / GRU / 3D-CNN 捕捉帧间运动特征（关节速度、重心加速度）
@@ -209,13 +209,13 @@ python webcam_fall_detection.py
 
 ---
 
-## 📄 论文
+## 论文
 
 《基于 MobileNetV3 与关键点融合的摔倒检测系统设计》（20 页，含完整代码附录与 15 篇参考文献）：
-👉 [机器学习课程论文.pdf](./机器学习课程论文.pdf)
+ [机器学习课程论文.pdf](./机器学习课程论文.pdf)
 
 ---
 
-## 📬 关于我
+## 关于我
 
 深度学习方向学习者，熟悉 **PyTorch / OpenCV / MediaPipe**，关注计算机视觉在**智能安防与智慧养老**场景的落地应用。本项目从数据整理、模型设计到实验分析全程独立完成。
