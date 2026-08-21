@@ -124,13 +124,11 @@ flowchart LR
 
 ## 🚀 快速开始
 
-### 1️⃣ 环境准备
+### 1️⃣ 环境准备（一键创建）
 
 ```bash
-conda create -n fall_detection python=3.8
+conda env create -f environment.yml   # 自动创建 fall_detection 环境并安装全部依赖
 conda activate fall_detection
-pip install torch==2.4.1 torchvision==0.19.1
-pip install scikit-learn seaborn tqdm matplotlib opencv-python mediapipe==0.10.8
 ```
 
 ### 2️⃣ 训练模型
