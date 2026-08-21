@@ -1,0 +1,788 @@
+import os
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms, models
+import numpy as np
+from PIL import Image
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc
+import seaborn as sns
+from collections import Counter
+import warnings
+warnings.filterwarnings('ignore')
+
+# 尝试导入Grad-CAM
+try:
+    from pytorch_grad_cam import GradCAM
+    from pytorch_grad_cam.utils.image import show_cam_on_image
+    GRAD_CAM_AVAILABLE = True
+except ImportError:
+    GRAD_CAM_AVAILABLE = False
+    print("提示: 未安装pytorch-grad-cam，CAM热力图功能将被跳过")
+    print("安装命令: pip install pytorch-grad-cam")
+
+
+# ================== 配置参数 ==================
+class Config:
+    DATA_ROOT = 'dataset'
+    TRAIN_IMAGES = os.path.join(DATA_ROOT, 'train/images')
+    TRAIN_XMLS = os.path.join(DATA_ROOT, 'train/images')
+    VAL_IMAGES = os.path.join(DATA_ROOT, 'val/images')
+    VAL_XMLS = os.path.join(DATA_ROOT, 'val/images')
+    
+    IMG_SIZE = 224
+    BATCH_SIZE = 16
+    EPOCHS = 50
+    LEARNING_RATE = 1e-4
+    NUM_CLASSES = 2
+    NUM_KEYPOINTS = 17
+    
+    MODEL_SAVE_PATH = 'checkpoints/fall_detection_model.pth'
+    RESNET18_SAVE_PATH = 'checkpoints/resnet18_fall_detection.pth'
+    
+    if torch.backends.mps.is_available():
+        DEVICE = torch.device('mps')
+        print("使用 Apple MPS 加速")
+    elif torch.cuda.is_available():
+        DEVICE = torch.device('cuda')
+        print("使用 CUDA 加速")
+    else:
+        DEVICE = torch.device('cpu')
+        print("使用 CPU")
+    
+    def __init__(self):
+        os.makedirs('checkpoints', exist_ok=True)
+        os.makedirs('logs', exist_ok=True)
+        print(f"\n数据路径检查:")
+        for name, path in [('训练图像', self.TRAIN_IMAGES), 
+                          ('训练XML', self.TRAIN_XMLS),
+                          ('验证图像', self.VAL_IMAGES), 
+                          ('验证XML', self.VAL_XMLS)]:
+            print(f"  {name}: {path} - {'✓' if os.path.exists(path) else '✗'}")
+
+
+# ================== 数据集类 ==================
+class FallDataset(Dataset):
+    def __init__(self, images_dir, xmls_dir, transform=None, img_size=224):
+        self.images_dir = Path(images_dir)
+        self.xmls_dir = Path(xmls_dir)
+        self.transform = transform
+        self.img_size = img_size
+        
+        self.image_files = []
+        for ext in ['*.png', '*.jpg', '*.jpeg']:
+            for f in self.images_dir.glob(ext):
+                try:
+                    with Image.open(f) as img:
+                        img.verify()
+                    self.image_files.append(f)
+                except:
+                    print(f"跳过损坏图像: {f.name}")
+        
+        self.image_files = sorted(self.image_files)
+        print(f"加载 {len(self.image_files)} 张图像")
+    
+    def parse_xml(self, xml_path):
+        try:
+            tree = ET.parse(xml_path)
+            root = tree.getroot()
+            label = 0
+            keypoints = np.zeros((17, 3), dtype=np.float32)
+            
+            for obj in root.findall('object'):
+                name_elem = obj.find('name')
+                if name_elem is not None and name_elem.text:
+                    name = name_elem.text.strip().lower()
+                    if name in ['down', 'fall', 'fallen']:
+                        label = 1
+                        break
+            return {'label': label, 'keypoints': keypoints}
+        except Exception as e:
+            return {'label': 0, 'keypoints': np.zeros((17, 3), dtype=np.float32)}
+    
+    def __len__(self):
+        return len(self.image_files)
+    
+    def __getitem__(self, idx):
+        img_path = self.image_files[idx]
+        try:
+            image = Image.open(img_path).convert('RGB')
+        except:
+            image = Image.new('RGB', (self.img_size, self.img_size))
+        
+        xml_path = self.xmls_dir / f"{img_path.stem}.xml"
+        if xml_path.exists():
+            ann = self.parse_xml(xml_path)
+        else:
+            ann = {'label': 0, 'keypoints': np.zeros((17, 3), dtype=np.float32)}
+        
+        keypoints = ann['keypoints'].copy()
+        
+        if self.transform:
+            image = self.transform(image)
+        else:
+            image = transforms.Compose([
+                transforms.Resize((self.img_size, self.img_size)),
+                transforms.ToTensor(),
+                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+            ])(image)
+        
+        return {
+            'image': image,
+            'keypoints': torch.tensor(keypoints[:, :2].flatten(), dtype=torch.float32),
+            'visibility': torch.tensor(keypoints[:, 2], dtype=torch.float32),
+            'label': torch.tensor(ann['label'], dtype=torch.long)
+        }
+
+
+# ================== MobileNetV3 + 关键点模型 ==================
+class FallDetectionModel(nn.Module):
+    def __init__(self, num_keypoints=17, num_classes=2):
+        super().__init__()
+        self.backbone = models.mobilenet_v3_large(weights=models.MobileNet_V3_Large_Weights.IMAGENET1K_V1)
+        backbone_dim = 960
+        self.backbone.classifier = nn.Identity()
+        
+        self.kp_encoder = nn.Sequential(
+            nn.Linear(num_keypoints * 2, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2),
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2),
+            nn.Linear(128, 64)
+        )
+        
+        self.classifier = nn.Sequential(
+            nn.Linear(backbone_dim + 64, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(128, num_classes)
+        )
+    
+    def forward(self, image, keypoints, visibility=None):
+        img_feat = self.backbone(image)
+        kp_feat = self.kp_encoder(keypoints)
+        combined = torch.cat([img_feat, kp_feat], dim=1)
+        return self.classifier(combined)
+
+
+# ================== ResNet18 模型（对比实验） ==================
+class ResNet18Model(nn.Module):
+    def __init__(self, num_classes=2):
+        super().__init__()
+        self.backbone = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+        in_features = self.backbone.fc.in_features
+        self.backbone.fc = nn.Sequential(
+            nn.Dropout(0.3),
+            nn.Linear(in_features, num_classes)
+        )
+    
+    def forward(self, image, keypoints=None, visibility=None):
+        return self.backbone(image)
+
+
+# ================== MobileNetV3 训练器 ==================
+class MobileNetV3Trainer:
+    def __init__(self, model, config):
+        self.model = model.to(config.DEVICE)
+        self.config = config
+        self.criterion = nn.CrossEntropyLoss()
+        self.optimizer = optim.AdamW(model.parameters(), lr=config.LEARNING_RATE, weight_decay=1e-4)
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode='min', factor=0.5, patience=5
+        )
+        self.history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
+    
+    def train_epoch(self, loader):
+        self.model.train()
+        total_loss, correct, total = 0, 0, 0
+        pbar = tqdm(loader, desc='Training MobileNetV3')
+        for batch in pbar:
+            images = batch['image'].to(self.config.DEVICE)
+            keypoints = batch['keypoints'].to(self.config.DEVICE)
+            labels = batch['label'].to(self.config.DEVICE)
+            
+            self.optimizer.zero_grad()
+            outputs = self.model(images, keypoints)
+            loss = self.criterion(outputs, labels)
+            loss.backward()
+            self.optimizer.step()
+            
+            total_loss += loss.item()
+            _, pred = outputs.max(1)
+            total += labels.size(0)
+            correct += pred.eq(labels).sum().item()
+            pbar.set_postfix({'Loss': f'{loss.item():.4f}', 'Acc': f'{100.*correct/total:.2f}%'})
+        return total_loss / len(loader), 100. * correct / total
+    
+    def validate(self, loader):
+        self.model.eval()
+        total_loss, correct, total = 0, 0, 0
+        all_preds, all_labels = [], []
+        with torch.no_grad():
+            for batch in tqdm(loader, desc='Validating MobileNetV3'):
+                images = batch['image'].to(self.config.DEVICE)
+                keypoints = batch['keypoints'].to(self.config.DEVICE)
+                labels = batch['label'].to(self.config.DEVICE)
+                
+                outputs = self.model(images, keypoints)
+                loss = self.criterion(outputs, labels)
+                
+                total_loss += loss.item()
+                _, pred = outputs.max(1)
+                total += labels.size(0)
+                correct += pred.eq(labels).sum().item()
+                
+                all_preds.extend(pred.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
+        return total_loss / len(loader), 100. * correct / total, all_preds, all_labels
+    
+    def train(self, train_loader, val_loader, class_weights=None):
+        if class_weights:
+            self.criterion = nn.CrossEntropyLoss(
+                weight=torch.FloatTensor(class_weights).to(self.config.DEVICE)
+            )
+        
+        print(f"\n{'='*60}")
+        print(f"🚀 开始训练 MobileNetV3 + 关键点分支")
+        print(f"设备: {self.config.DEVICE}")
+        print(f"{'='*60}\n")
+        
+        best_acc = 0
+        patience = 0
+        
+        for epoch in range(self.config.EPOCHS):
+            print(f'\nEpoch {epoch+1}/{self.config.EPOCHS}')
+            train_loss, train_acc = self.train_epoch(train_loader)
+            val_loss, val_acc, _, _ = self.validate(val_loader)
+            self.scheduler.step(val_loss)
+            
+            self.history['train_loss'].append(train_loss)
+            self.history['train_acc'].append(train_acc)
+            self.history['val_loss'].append(val_loss)
+            self.history['val_acc'].append(val_acc)
+            
+            print(f'Train Loss: {train_loss:.4f} | Acc: {train_acc:.2f}%')
+            print(f'Val Loss: {val_loss:.4f} | Acc: {val_acc:.2f}%')
+            
+            if val_acc > best_acc:
+                best_acc = val_acc
+                torch.save({
+                    'model_state_dict': self.model.state_dict(),
+                    'val_acc': val_acc
+                }, self.config.MODEL_SAVE_PATH)
+                print(f'✓ 保存最佳模型 (Acc: {val_acc:.2f}%)')
+                patience = 0
+            else:
+                patience += 1
+                if patience >= 10:
+                    print(f'早停! 最佳准确率: {best_acc:.2f}%')
+                    break
+        
+        print(f'\n✅ 训练完成! 最佳准确率: {best_acc:.2f}%')
+        return self.history
+
+
+# ================== ResNet18 训练器 ==================
+class ResNet18Trainer:
+    def __init__(self, model, config):
+        self.model = model.to(config.DEVICE)
+        self.config = config
+        self.criterion = nn.CrossEntropyLoss()
+        self.optimizer = optim.AdamW(model.parameters(), lr=config.LEARNING_RATE, weight_decay=1e-4)
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode='min', factor=0.5, patience=5
+        )
+        self.history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
+    
+    def train_epoch(self, loader):
+        self.model.train()
+        total_loss, correct, total = 0, 0, 0
+        pbar = tqdm(loader, desc='Training ResNet18')
+        for batch in pbar:
+            images = batch['image'].to(self.config.DEVICE)
+            labels = batch['label'].to(self.config.DEVICE)
+            
+            self.optimizer.zero_grad()
+            outputs = self.model(images)
+            loss = self.criterion(outputs, labels)
+            loss.backward()
+            self.optimizer.step()
+            
+            total_loss += loss.item()
+            _, pred = outputs.max(1)
+            total += labels.size(0)
+            correct += pred.eq(labels).sum().item()
+            pbar.set_postfix({'Loss': f'{loss.item():.4f}', 'Acc': f'{100.*correct/total:.2f}%'})
+        return total_loss / len(loader), 100. * correct / total
+    
+    def validate(self, loader):
+        self.model.eval()
+        total_loss, correct, total = 0, 0, 0
+        all_preds, all_labels = [], []
+        with torch.no_grad():
+            for batch in tqdm(loader, desc='Validating ResNet18'):
+                images = batch['image'].to(self.config.DEVICE)
+                labels = batch['label'].to(self.config.DEVICE)
+                
+                outputs = self.model(images)
+                loss = self.criterion(outputs, labels)
+                
+                total_loss += loss.item()
+                _, pred = outputs.max(1)
+                total += labels.size(0)
+                correct += pred.eq(labels).sum().item()
+                
+                all_preds.extend(pred.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
+        return total_loss / len(loader), 100. * correct / total, all_preds, all_labels
+    
+    def train(self, train_loader, val_loader, class_weights=None):
+        if class_weights:
+            self.criterion = nn.CrossEntropyLoss(
+                weight=torch.FloatTensor(class_weights).to(self.config.DEVICE)
+            )
+        
+        print(f"\n{'='*60}")
+        print(f"🚀 开始训练 ResNet18（对比实验）")
+        print(f"设备: {self.config.DEVICE}")
+        print(f"{'='*60}\n")
+        
+        best_acc = 0
+        patience = 0
+        
+        for epoch in range(self.config.EPOCHS):
+            print(f'\nEpoch {epoch+1}/{self.config.EPOCHS}')
+            train_loss, train_acc = self.train_epoch(train_loader)
+            val_loss, val_acc, _, _ = self.validate(val_loader)
+            self.scheduler.step(val_loss)
+            
+            self.history['train_loss'].append(train_loss)
+            self.history['train_acc'].append(train_acc)
+            self.history['val_loss'].append(val_loss)
+            self.history['val_acc'].append(val_acc)
+            
+            print(f'Train Loss: {train_loss:.4f} | Acc: {train_acc:.2f}%')
+            print(f'Val Loss: {val_loss:.4f} | Acc: {val_acc:.2f}%')
+            
+            if val_acc > best_acc:
+                best_acc = val_acc
+                torch.save({
+                    'model_state_dict': self.model.state_dict(),
+                    'val_acc': val_acc
+                }, self.config.RESNET18_SAVE_PATH)
+                print(f'✓ 保存最佳模型 (Acc: {val_acc:.2f}%)')
+                patience = 0
+            else:
+                patience += 1
+                if patience >= 10:
+                    print(f'早停! 最佳准确率: {best_acc:.2f}%')
+                    break
+        
+        print(f'\n✅ 训练完成! 最佳准确率: {best_acc:.2f}%')
+        return self.history
+
+
+# ================== 工具函数 ==================
+def get_transforms(img_size=224, is_train=True):
+    if is_train:
+        return transforms.Compose([
+            transforms.Resize((img_size, img_size)),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomRotation(10),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        ])
+    return transforms.Compose([
+        transforms.Resize((img_size, img_size)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+
+
+def plot_training_history(history, title_prefix=""):
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    axes[0].plot(history['train_loss'], label='Train Loss')
+    axes[0].plot(history['val_loss'], label='Val Loss')
+    axes[0].set_title(f'{title_prefix} Loss Curve')
+    axes[0].set_xlabel('Epoch')
+    axes[0].set_ylabel('Loss')
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+    
+    axes[1].plot(history['train_acc'], label='Train Acc')
+    axes[1].plot(history['val_acc'], label='Val Acc')
+    axes[1].set_title(f'{title_prefix} Accuracy Curve')
+    axes[1].set_xlabel('Epoch')
+    axes[1].set_ylabel('Accuracy (%)')
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(f'logs/{title_prefix.lower().replace(" ", "_")}_history.png', dpi=150)
+    plt.show()
+
+
+def plot_confusion_matrix(labels, preds, title_prefix=""):
+    if len(set(labels)) < 2:
+        print(f"⚠️ {title_prefix}: 验证集只有一个类别，跳过混淆矩阵")
+        return
+    cm = confusion_matrix(labels, preds)
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                xticklabels=['正常', '摔倒'], yticklabels=['正常', '摔倒'])
+    plt.title(f'{title_prefix} Confusion Matrix')
+    plt.tight_layout()
+    plt.savefig(f'logs/{title_prefix.lower().replace(" ", "_")}_cm.png', dpi=150)
+    plt.show()
+
+
+def plot_roc_curve(model, val_loader, config, model_name, use_keypoints=True):
+    """绘制ROC曲线"""
+    model.eval()
+    all_probs = []
+    all_labels = []
+    
+    with torch.no_grad():
+        for batch in tqdm(val_loader, desc=f'Computing ROC for {model_name}'):
+            images = batch['image'].to(config.DEVICE)
+            labels = batch['label'].to(config.DEVICE)
+            
+            if use_keypoints:
+                keypoints = batch['keypoints'].to(config.DEVICE)
+                outputs = model(images, keypoints)
+            else:
+                outputs = model(images)
+            
+            probs = torch.softmax(outputs, dim=1)[:, 1]
+            all_probs.extend(probs.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+    
+    fpr, tpr, _ = roc_curve(all_labels, all_probs)
+    roc_auc = auc(fpr, tpr)
+    
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'{model_name} (AUC = {roc_auc:.3f})')
+    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label='Random (AUC = 0.5)')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title(f'ROC Curve - {model_name}')
+    plt.legend(loc="lower right")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(f'logs/roc_curve_{model_name.lower().replace(" ", "_")}.png', dpi=150)
+    plt.show()
+    
+    return roc_auc
+
+
+def plot_model_comparison(results):
+    """绘制模型对比柱状图"""
+    names = list(results.keys())
+    accs = [results[name]['acc'] for name in names]
+    params = [results[name]['params'] for name in names]
+    
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # 准确率对比
+    bars1 = axes[0].bar(names, accs, color=['#3498db', '#e74c3c'])
+    axes[0].set_ylabel('Validation Accuracy (%)')
+    axes[0].set_title('Model Accuracy Comparison')
+    axes[0].set_ylim(0, 100)
+    for bar, acc in zip(bars1, accs):
+        axes[0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
+                    f'{acc:.1f}%', ha='center', va='bottom', fontsize=11)
+    
+    # 参数量对比
+    bars2 = axes[1].bar(names, [p/1e6 for p in params], color=['#3498db', '#e74c3c'])
+    axes[1].set_ylabel('Parameters (Millions)')
+    axes[1].set_title('Model Size Comparison')
+    for bar, p in zip(bars2, params):
+        axes[1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.05,
+                    f'{p/1e6:.2f}M', ha='center', va='bottom', fontsize=11)
+    
+    plt.tight_layout()
+    plt.savefig('logs/model_comparison.png', dpi=150)
+    plt.show()
+
+
+def generate_cam_heatmaps(model, val_loader, config, model_name, use_keypoints=True, num_samples=5):
+    """生成Grad-CAM热力图"""
+    if not GRAD_CAM_AVAILABLE:
+        print("跳过CAM热力图: 未安装pytorch-grad-cam")
+        return
+    
+    model.eval()
+    
+    # 获取目标层
+    if isinstance(model, ResNet18Model):
+        target_layers = [model.backbone.layer4[-1]]
+    else:
+        target_layers = [model.backbone.features[-1]]
+    
+    cam = GradCAM(model=model, target_layers=target_layers)
+    
+    # 收集样本
+    samples = []
+    for batch in val_loader:
+        samples.append(batch)
+        if len(samples) * config.BATCH_SIZE >= num_samples:
+            break
+    
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(config.DEVICE)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(config.DEVICE)
+    
+    sample_idx = 0
+    for batch in samples:
+        images = batch['image'][:num_samples - sample_idx].to(config.DEVICE)
+        labels = batch['label'][:num_samples - sample_idx].cpu().numpy()
+        keypoints = batch['keypoints'][:num_samples - sample_idx].to(config.DEVICE)
+        
+        display_images = (images * std + mean).cpu().numpy().transpose(0, 2, 3, 1)
+        display_images = np.clip(display_images, 0, 1)
+        
+        fig, axes = plt.subplots(min(len(images), num_samples - sample_idx), 3, 
+                                 figsize=(12, 4*min(len(images), num_samples - sample_idx)))
+        if len(images) == 1:
+            axes = axes.reshape(1, -1)
+        
+        for i in range(len(images)):
+            if sample_idx >= num_samples:
+                break
+            
+            if use_keypoints:
+                grayscale_cam = cam(input_tensor=images[i:i+1], targets=None)
+            else:
+                grayscale_cam = cam(input_tensor=images[i:i+1], targets=None)
+            
+            cam_image = show_cam_on_image(display_images[i], grayscale_cam[0], use_rgb=True)
+            
+            axes[i, 0].imshow(display_images[i])
+            axes[i, 0].set_title(f'Original\nTrue: {"摔倒" if labels[i]==1 else "正常"}')
+            axes[i, 0].axis('off')
+            
+            axes[i, 1].imshow(grayscale_cam[0], cmap='jet')
+            axes[i, 1].set_title('CAM Heatmap')
+            axes[i, 1].axis('off')
+            
+            axes[i, 2].imshow(cam_image)
+            axes[i, 2].set_title('Overlay')
+            axes[i, 2].axis('off')
+            
+            sample_idx += 1
+        
+        plt.tight_layout()
+        plt.savefig(f'logs/cam_{model_name.lower().replace(" ", "_")}.png', dpi=150)
+        plt.show()
+        if sample_idx >= num_samples:
+            break
+
+
+# ================== 推理器 ==================
+class FallDetector:
+    def __init__(self, model_path, model_type='mobilenetv3', config=None):
+        self.config = config or Config()
+        self.device = self.config.DEVICE
+        self.model_type = model_type
+        
+        if model_type == 'mobilenetv3':
+            self.model = FallDetectionModel()
+        else:
+            self.model = ResNet18Model()
+        
+        checkpoint = torch.load(model_path, map_location=self.device)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.model.to(self.device)
+        self.model.eval()
+        
+        self.transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        ])
+        
+        print(f"✅ {model_type.upper()} 模型加载成功 (验证准确率: {checkpoint.get('val_acc', 'N/A'):.2f}%)")
+    
+    def predict_image(self, image_path):
+        image = Image.open(image_path).convert('RGB')
+        image_tensor = self.transform(image).unsqueeze(0).to(self.device)
+        
+        with torch.no_grad():
+            if self.model_type == 'mobilenetv3':
+                keypoints = torch.zeros(1, 34).to(self.device)
+                outputs = self.model(image_tensor, keypoints)
+            else:
+                outputs = self.model(image_tensor)
+            probabilities = torch.softmax(outputs, dim=1)
+            predicted_class = torch.argmax(outputs, dim=1).item()
+        
+        return {
+            'class': '摔倒' if predicted_class == 1 else '正常',
+            'class_id': predicted_class,
+            'confidence': probabilities[0][predicted_class].item(),
+            'probabilities': {'正常': probabilities[0][0].item(), '摔倒': probabilities[0][1].item()}
+        }
+
+
+# ================== 主函数 ==================
+def main():
+    config = Config()
+    
+    # 创建数据集
+    print("\n创建数据集...")
+    train_ds = FallDataset(config.TRAIN_IMAGES, config.TRAIN_XMLS, 
+                           get_transforms(config.IMG_SIZE, True))
+    val_ds = FallDataset(config.VAL_IMAGES, config.VAL_XMLS, 
+                         get_transforms(config.IMG_SIZE, False))
+    
+    # 分析标签分布
+    train_labels = [int(train_ds[i]['label']) for i in range(len(train_ds))]
+    val_labels = [int(val_ds[i]['label']) for i in range(len(val_ds))]
+    train_cnt = Counter(train_labels)
+    val_cnt = Counter(val_labels)
+    
+    print(f"\n训练集分布: 正常={train_cnt.get(0,0)}, 摔倒={train_cnt.get(1,0)}")
+    print(f"验证集分布: 正常={val_cnt.get(0,0)}, 摔倒={val_cnt.get(1,0)}")
+    
+    # 类别权重
+    n = len(train_labels)
+    weights = [n / (2 * max(train_cnt.get(i, 1), 1)) for i in range(2)]
+    print(f"类别权重: 正常={weights[0]:.2f}, 摔倒={weights[1]:.2f}")
+    
+    # DataLoader
+    train_loader = DataLoader(train_ds, batch_size=config.BATCH_SIZE, shuffle=True, num_workers=0, drop_last=True)
+    val_loader = DataLoader(val_ds, batch_size=config.BATCH_SIZE, shuffle=False, num_workers=0)
+    
+    results = {}
+    
+    # ================== 训练 MobileNetV3 模型 ==================
+    print("\n" + "="*80)
+    print("📱 模型 1: MobileNetV3-Large + 关键点分支")
+    print("="*80)
+    
+    model1 = FallDetectionModel()
+    print(f"MobileNetV3 参数量: {sum(p.numel() for p in model1.parameters()):,}")
+    
+    trainer1 = MobileNetV3Trainer(model1, config)
+    history1 = trainer1.train(train_loader, val_loader, weights)
+    
+    # 加载最佳模型并评估
+    checkpoint1 = torch.load(config.MODEL_SAVE_PATH, map_location=config.DEVICE)
+    model1.load_state_dict(checkpoint1['model_state_dict'])
+    val_loss1, val_acc1, preds1, labels1 = trainer1.validate(val_loader)
+    
+    results['MobileNetV3'] = {
+        'acc': val_acc1,
+        'history': history1,
+        'preds': preds1,
+        'labels': labels1,
+        'params': sum(p.numel() for p in model1.parameters())
+    }
+    
+    # 绘制训练曲线
+    plot_training_history(history1, "MobileNetV3")
+    plot_confusion_matrix(labels1, preds1, "MobileNetV3")
+    
+    # 绘制ROC曲线
+    roc_auc1 = plot_roc_curve(model1, val_loader, config, "MobileNetV3", use_keypoints=True)
+    print(f"MobileNetV3 AUC: {roc_auc1:.3f}")
+    
+    # 生成CAM热力图
+    if GRAD_CAM_AVAILABLE:
+        generate_cam_heatmaps(model1, val_loader, config, "MobileNetV3", use_keypoints=True, num_samples=5)
+    
+    # ================== 训练 ResNet18 模型（对比） ==================
+    print("\n" + "="*80)
+    print("🔬 模型 2: ResNet18（纯图像分类 - 对比实验）")
+    print("="*80)
+    
+    model2 = ResNet18Model()
+    print(f"ResNet18 参数量: {sum(p.numel() for p in model2.parameters()):,}")
+    
+    trainer2 = ResNet18Trainer(model2, config)
+    history2 = trainer2.train(train_loader, val_loader, weights)
+    
+    # 加载最佳模型并评估
+    if os.path.exists(config.RESNET18_SAVE_PATH):
+        checkpoint2 = torch.load(config.RESNET18_SAVE_PATH, map_location=config.DEVICE)
+        model2.load_state_dict(checkpoint2['model_state_dict'])
+    val_loss2, val_acc2, preds2, labels2 = trainer2.validate(val_loader)
+    
+    results['ResNet18'] = {
+        'acc': val_acc2,
+        'history': history2,
+        'preds': preds2,
+        'labels': labels2,
+        'params': sum(p.numel() for p in model2.parameters())
+    }
+    
+    # 绘制训练曲线
+    plot_training_history(history2, "ResNet18")
+    plot_confusion_matrix(labels2, preds2, "ResNet18")
+    
+    # 绘制ROC曲线
+    roc_auc2 = plot_roc_curve(model2, val_loader, config, "ResNet18", use_keypoints=False)
+    print(f"ResNet18 AUC: {roc_auc2:.3f}")
+    
+    # ================== 模型对比总结 ==================
+    print("\n" + "="*60)
+    print("📊 模型对比结果汇总")
+    print("="*60)
+    print(f"\n{'模型':<20} {'验证准确率':<15} {'参数量':<15} {'AUC':<10}")
+    print("-" * 60)
+    print(f"{'MobileNetV3':<20} {results['MobileNetV3']['acc']:.2f}%{'':<10} {results['MobileNetV3']['params']:,}   {roc_auc1:.3f}")
+    print(f"{'ResNet18':<20} {results['ResNet18']['acc']:.2f}%{'':<10} {results['ResNet18']['params']:,}   {roc_auc2:.3f}")
+    
+    # 绘制模型对比图
+    plot_model_comparison(results)
+    
+    # ================== 推理演示 ==================
+    print("\n" + "="*60)
+    print("推理演示")
+    print("="*60)
+    
+    # 使用最佳模型进行推理
+    best_model_name = max(results, key=lambda x: results[x]['acc'])
+    print(f"\n使用最佳模型: {best_model_name} (准确率: {results[best_model_name]['acc']:.2f}%)")
+    
+    if best_model_name == 'MobileNetV3':
+        detector = FallDetector(config.MODEL_SAVE_PATH, 'mobilenetv3', config)
+    else:
+        detector = FallDetector(config.RESNET18_SAVE_PATH, 'resnet18', config)
+    
+    # 测试几张验证集图像
+    val_images = list(Path(config.VAL_IMAGES).glob('*.jpg'))[:5]
+    if len(val_images) == 0:
+        val_images = list(Path(config.VAL_IMAGES).glob('*.png'))[:5]
+    
+    if val_images:
+        print(f"\n测试 {len(val_images)} 张验证集图像:")
+        for img_path in val_images:
+            result = detector.predict_image(img_path)
+            print(f"  {img_path.name}: {result['class']} (置信度: {result['confidence']:.2%})")
+    
+    print(f"\n✅ 所有实验完成！")
+    print(f"📁 模型保存位置:")
+    print(f"   MobileNetV3: {config.MODEL_SAVE_PATH}")
+    print(f"   ResNet18: {config.RESNET18_SAVE_PATH}")
+    print(f"📁 日志和图表: logs/ 目录")
+
+
+if __name__ == '__main__':
+    main()

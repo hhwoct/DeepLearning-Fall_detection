@@ -1,0 +1,26 @@
+<annotation>
+  <folder>12_3_zj</folder>
+  <filename>people(5181).jpg</filename>
+  <path>C:\Users\liujia\Desktop\12_3_zj\people(5181).jpg</path>
+  <source>
+    <database>Unknown</database>
+  </source>
+  <size>
+    <width>598</width>
+    <height>486</height>
+    <depth>3</depth>
+  </size>
+  <segmented>0</segmented>
+  <object>
+    <name>person</name>
+    <pose>Unspecified</pose>
+    <truncated>0</truncated>
+    <difficult>0</difficult>
+    <bndbox>
+      <xmin>184</xmin>
+      <ymin>139</ymin>
+      <xmax>277</xmax>
+      <ymax>428</ymax>
+    </bndbox>
+  </object>
+</annotation>

@@ -1,0 +1,26 @@
+<annotation>
+	<folder>1126liuyu</folder>
+	<filename>people(6800).jpg</filename>
+	<path>E:\1127\1126liuyu\1126liuyu\people(6800).jpg</path>
+	<source>
+		<database>Unknown</database>
+	</source>
+	<size>
+		<width>490</width>
+		<height>300</height>
+		<depth>3</depth>
+	</size>
+	<segmented>0</segmented>
+	<object>
+		<name>down</name>
+		<pose>Unspecified</pose>
+		<truncated>0</truncated>
+		<difficult>0</difficult>
+		<bndbox>
+			<xmin>107</xmin>
+			<ymin>59</ymin>
+			<xmax>485</xmax>
+			<ymax>267</ymax>
+		</bndbox>
+	</object>
+</annotation>

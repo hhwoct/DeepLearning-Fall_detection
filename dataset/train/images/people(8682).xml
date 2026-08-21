@@ -1,0 +1,26 @@
+<annotation>
+	<folder>715_12_2</folder>
+	<filename>people(8682).jpg</filename>
+	<path>C:\Users\刘嘉\Desktop\715_12_2\people(8682).jpg</path>
+	<source>
+		<database>Unknown</database>
+	</source>
+	<size>
+		<width>396</width>
+		<height>550</height>
+		<depth>3</depth>
+	</size>
+	<segmented>0</segmented>
+	<object>
+		<name>down</name>
+		<pose>Unspecified</pose>
+		<truncated>1</truncated>
+		<difficult>0</difficult>
+		<bndbox>
+			<xmin>15</xmin>
+			<ymin>1</ymin>
+			<xmax>396</xmax>
+			<ymax>505</ymax>
+		</bndbox>
+	</object>
+</annotation>

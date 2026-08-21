@@ -1,0 +1,26 @@
+<annotation>
+  <folder>11_28_downliujia</folder>
+  <filename>people(6104).jpg</filename>
+  <path>C:\Users\liujia\Desktop\11_28_downliujia\people(6104).jpg</path>
+  <source>
+    <database>Unknown</database>
+  </source>
+  <size>
+    <width>500</width>
+    <height>265</height>
+    <depth>3</depth>
+  </size>
+  <segmented>0</segmented>
+  <object>
+    <name>down</name>
+    <pose>Unspecified</pose>
+    <truncated>0</truncated>
+    <difficult>0</difficult>
+    <bndbox>
+      <xmin>43</xmin>
+      <ymin>60</ymin>
+      <xmax>474</xmax>
+      <ymax>207</ymax>
+    </bndbox>
+  </object>
+</annotation>

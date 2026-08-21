@@ -1,0 +1,26 @@
+<annotation>
+  <folder>11_28_downliujia</folder>
+  <filename>people(6035).jpg</filename>
+  <path>D:\Mission\11_28_down_liujia\11_28_downliujia\people(6035).jpg</path>
+  <source>
+    <database>Unknown</database>
+  </source>
+  <size>
+    <width>500</width>
+    <height>325</height>
+    <depth>3</depth>
+  </size>
+  <segmented>0</segmented>
+  <object>
+    <name>down</name>
+    <pose>Unspecified</pose>
+    <truncated>0</truncated>
+    <difficult>0</difficult>
+    <bndbox>
+      <xmin>2</xmin>
+      <ymin>8</ymin>
+      <xmax>317</xmax>
+      <ymax>258</ymax>
+    </bndbox>
+  </object>
+</annotation>

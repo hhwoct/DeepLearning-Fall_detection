@@ -1,0 +1,26 @@
+<annotation>
+	<folder>lixinyuan</folder>
+	<filename>people(7538).jpg</filename>
+	<path>C:\Users\86151\Desktop\lixinyuan\people(7538).jpg</path>
+	<source>
+		<database>Unknown</database>
+	</source>
+	<size>
+		<width>500</width>
+		<height>327</height>
+		<depth>3</depth>
+	</size>
+	<segmented>0</segmented>
+	<object>
+		<name>down</name>
+		<pose>Unspecified</pose>
+		<truncated>0</truncated>
+		<difficult>0</difficult>
+		<bndbox>
+			<xmin>41</xmin>
+			<ymin>85</ymin>
+			<xmax>488</xmax>
+			<ymax>253</ymax>
+		</bndbox>
+	</object>
+</annotation>
