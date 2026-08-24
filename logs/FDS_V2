@@ -13,8 +13,14 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc
 import seaborn as sns
 from collections import Counter
+import random
 import warnings
 warnings.filterwarnings('ignore')
+
+# ================== 随机种子（保证实验可复现） ==================
+random.seed(42)
+np.random.seed(42)
+torch.manual_seed(42)
 
 # 尝试导入Grad-CAM
 try:
@@ -112,7 +118,7 @@ class FallDataset(Dataset):
         img_path = self.image_files[idx]
         try:
             image = Image.open(img_path).convert('RGB')
-        except:
+        except Exception:
             image = Image.new('RGB', (self.img_size, self.img_size))
         
         xml_path = self.xmls_dir / f"{img_path.stem}.xml"
@@ -434,7 +440,7 @@ def plot_training_history(history, title_prefix=""):
     
     plt.tight_layout()
     plt.savefig(f'logs/{title_prefix.lower().replace(" ", "_")}_history.png', dpi=150)
-    plt.show()
+    plt.show(block=False)
 
 
 def plot_confusion_matrix(labels, preds, title_prefix=""):
@@ -448,7 +454,7 @@ def plot_confusion_matrix(labels, preds, title_prefix=""):
     plt.title(f'{title_prefix} Confusion Matrix')
     plt.tight_layout()
     plt.savefig(f'logs/{title_prefix.lower().replace(" ", "_")}_cm.png', dpi=150)
-    plt.show()
+    plt.show(block=False)
 
 
 def plot_roc_curve(model, val_loader, config, model_name, use_keypoints=True):
@@ -487,7 +493,7 @@ def plot_roc_curve(model, val_loader, config, model_name, use_keypoints=True):
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(f'logs/roc_curve_{model_name.lower().replace(" ", "_")}.png', dpi=150)
-    plt.show()
+    plt.show(block=False)
     
     return roc_auc
 
@@ -519,7 +525,7 @@ def plot_model_comparison(results):
     
     plt.tight_layout()
     plt.savefig('logs/model_comparison.png', dpi=150)
-    plt.show()
+    plt.show(block=False)
 
 
 def generate_cam_heatmaps(model, val_loader, config, model_name, use_keypoints=True, num_samples=5):
@@ -536,7 +542,15 @@ def generate_cam_heatmaps(model, val_loader, config, model_name, use_keypoints=T
     else:
         target_layers = [model.backbone.features[-1]]
     
-    cam = GradCAM(model=model, target_layers=target_layers)
+    # GradCAM 只支持单输入 forward，双分支模型需要用包装器固定关键点输入
+    class GradCAMWrapper(nn.Module):
+        def __init__(self, model, keypoints):
+            super().__init__()
+            self.model = model
+            self.register_buffer('kp', keypoints)
+        def forward(self, x):
+            # 用切片选择而非 expand：GradCAM 逐张调用时 x.size(0)==1，expand 会崩溃
+            return self.model(x, self.kp[:x.size(0)])
     
     # 收集样本
     samples = []
@@ -562,14 +576,18 @@ def generate_cam_heatmaps(model, val_loader, config, model_name, use_keypoints=T
         if len(images) == 1:
             axes = axes.reshape(1, -1)
         
+        # 双分支模型：用包装器固定本批次的关键点输入（ResNet18 直接用原模型）
+        if isinstance(model, ResNet18Model):
+            cam_model = model
+        else:
+            cam_model = GradCAMWrapper(model, keypoints)
+        cam = GradCAM(model=cam_model, target_layers=target_layers)
+        
         for i in range(len(images)):
             if sample_idx >= num_samples:
                 break
             
-            if use_keypoints:
-                grayscale_cam = cam(input_tensor=images[i:i+1], targets=None)
-            else:
-                grayscale_cam = cam(input_tensor=images[i:i+1], targets=None)
+            grayscale_cam = cam(input_tensor=images[i:i+1], targets=None)
             
             cam_image = show_cam_on_image(display_images[i], grayscale_cam[0], use_rgb=True)
             
@@ -589,7 +607,7 @@ def generate_cam_heatmaps(model, val_loader, config, model_name, use_keypoints=T
         
         plt.tight_layout()
         plt.savefig(f'logs/cam_{model_name.lower().replace(" ", "_")}.png', dpi=150)
-        plt.show()
+        plt.show(block=False)
         if sample_idx >= num_samples:
             break
 
@@ -606,7 +624,7 @@ class FallDetector:
         else:
             self.model = ResNet18Model()
         
-        checkpoint = torch.load(model_path, map_location=self.device)
+        checkpoint = torch.load(model_path, map_location=self.device, weights_only=True)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.model.to(self.device)
         self.model.eval()
@@ -617,7 +635,7 @@ class FallDetector:
             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         ])
         
-        print(f"✅ {model_type.upper()} 模型加载成功 (验证准确率: {checkpoint.get('val_acc', 'N/A'):.2f}%)")
+        print(f"✅ {model_type.upper()} 模型加载成功 (验证准确率: {checkpoint.get('val_acc', 0.0):.2f}%)")
     
     def predict_image(self, image_path):
         image = Image.open(image_path).convert('RGB')
@@ -683,7 +701,7 @@ def main():
     history1 = trainer1.train(train_loader, val_loader, weights)
     
     # 加载最佳模型并评估
-    checkpoint1 = torch.load(config.MODEL_SAVE_PATH, map_location=config.DEVICE)
+    checkpoint1 = torch.load(config.MODEL_SAVE_PATH, map_location=config.DEVICE, weights_only=True)
     model1.load_state_dict(checkpoint1['model_state_dict'])
     val_loss1, val_acc1, preds1, labels1 = trainer1.validate(val_loader)
     
@@ -720,7 +738,7 @@ def main():
     
     # 加载最佳模型并评估
     if os.path.exists(config.RESNET18_SAVE_PATH):
-        checkpoint2 = torch.load(config.RESNET18_SAVE_PATH, map_location=config.DEVICE)
+        checkpoint2 = torch.load(config.RESNET18_SAVE_PATH, map_location=config.DEVICE, weights_only=True)
         model2.load_state_dict(checkpoint2['model_state_dict'])
     val_loss2, val_acc2, preds2, labels2 = trainer2.validate(val_loader)
     
